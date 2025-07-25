@@ -1041,6 +1041,11 @@ interactionFn interactions[16][16] = {
 };
 
 void interact(Term neg, Term pos) {
+  print_raw_term(neg);
+  printf("  ");
+  print_raw_term(pos);
+  printf("\n");
+
   rdxCount++;
   // Gets the rule type.
   interactionFn rule = interactions[term_tag(neg)][term_tag(pos)];
