@@ -36,10 +36,7 @@ typedef u64 Term;
 #define EMPTY_FREE_LIST 0xFFFFFFFE
 #define LOCK_FREE_LIST 0xFFFFFFFF
 
-extern a64 RBAG_END;
-extern Term* RBAG_BUFF;
 #define LOCK_REDEX_STACK 0xFFFFFFFF
-extern a64 waiting;
 extern __thread u64 rdxCount;
 
 // Global VM state
@@ -144,7 +141,7 @@ void store_redex(Term neg, Term pos);
 
 // Perform interactions until the redex stack is empty
 // Returns the number of interactions performed
-void *normalize(void *v);
+void normalize();
 void spawn_threads();
 extern pthread_t threads[];
 

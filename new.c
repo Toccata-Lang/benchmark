@@ -11,9 +11,6 @@ __thread Location FREE_LIST = EMPTY_FREE_LIST; // Head of the free list (atomic 
 
 // Redex stack
 __thread Pairs pairs;
-Term* RBAG_BUFF = NULL; // Using Term (u64) instead of atomic (a64)
-static u64 RBAG_SIZE = 0x1000;
-a64 RBAG_END; // Only need to track the end of the redex stack
 __thread u64 rdxCount = 0;
 
 // interaction jump table
@@ -194,50 +191,6 @@ bool pop_redex(Term* neg, Term* pos) {
     *pos = pairs.rdxs[pairs.count][1];
     return true;
   }
-
-  u64 currTop;
-  u64 waitingThreads;
-  do {
-    currTop = atomic_exchange_explicit(&RBAG_END, LOCK_REDEX_STACK, memory_order_relaxed);
-
-    switch(currTop) {
-    case LOCK_REDEX_STACK:
-      break;
-
-    case 0:
-      pthread_mutex_lock(&redex_mutex);
-      waitingThreads = atomic_fetch_add_explicit(&waiting, 1, memory_order_relaxed);
-      atomic_store_explicit(&RBAG_END, 0, memory_order_relaxed);
-      pthread_cond_wait(&redex_cond, &redex_mutex);
-      u64 currWaiting = atomic_fetch_add_explicit(&waiting, -1, memory_order_relaxed);
-      if (currWaiting > 0) {
-	pthread_cond_signal(&redex_cond);
-      }
-      pthread_mutex_unlock(&redex_mutex);
-      currTop = LOCK_REDEX_STACK;
-      break;
-
-    default:
-      currTop -= 2;
-      *neg = RBAG_BUFF[currTop];
-      *pos = RBAG_BUFF[currTop + 1];
-      atomic_store_explicit(&RBAG_END, currTop, memory_order_relaxed);
-      if (*neg == 0 && *pos == 0) {
-	/*
-	waitingThreads = atomic_load_explicit(&waiting, memory_order_relaxed);
-	if (waitingThreads > 0) {
-	  pthread_mutex_lock(&redex_mutex);
-	  printf("signal %d %lu %lu\n", __LINE__, currTop, waitingThreads);
-	  pthread_cond_signal(&redex_cond);
-	  pthread_mutex_unlock(&redex_mutex);
-	}
-	// */
-	result = false;
-      } else
-	result = true;
-      break;
-    }
-  } while (currTop == LOCK_REDEX_STACK);
 
 #ifdef SAFETY
   if (*neg == 0 || *pos == 0)
@@ -584,51 +537,7 @@ void link_redexes() {
     }
   }
   pairs.count = 0;
-  unsigned pushCount = LOCAL_PAIRS_SIZE / 2;
-  if (pushCount > pushing.count)
-    pushCount = pushing.count;
-  printf("pushing: %u immediate: %u  pushed: %u\n", pushing.count, immediate.count, pushCount);
-
-  if (pushing.count > 0) {
-    u64 currTop;
-    do {
-      currTop = atomic_exchange_explicit(&RBAG_END, LOCK_REDEX_STACK, memory_order_relaxed);
-      switch (currTop) {
-      case LOCK_REDEX_STACK:
-	break;
-
-      default:
-	if (1) {
-#ifdef SAFETY
-	  // Check if there's space in the bag
-	  if (currTop + pushCount > RBAG_SIZE) {
-	    fprintf(stderr, "Error: Redex bag is full. RBAG_END=%lu, RBAG_SIZE=%lu\n",
-		    currTop, RBAG_SIZE);
-	    abort();
-	  }
-#endif
-	  u64 newTop = currTop;
-	  for (int i = 1; i < pushCount; i++, newTop += 2) {
-	    // Store the redex in the bag
-	    RBAG_BUFF[newTop] = pushing.rdxs[i][0];
-	    RBAG_BUFF[newTop + 1] = pushing.rdxs[i][1];
-	  }
-
-#ifndef SINGLE_THREAD
-	  u64 waitingThreads = atomic_load_explicit(&waiting, memory_order_relaxed);
-	  if (waitingThreads > 0) {
-	    pthread_mutex_lock(&redex_mutex);
-	    pthread_cond_signal(&redex_cond);
-	    pthread_mutex_unlock(&redex_mutex);
-	  }
-#endif
-	  atomic_store_explicit(&RBAG_END, newTop, memory_order_relaxed);
-	}
-      }
-    } while (currTop == LOCK_REDEX_STACK);
-  }
-
-  for (int i = pushCount; i < pushing.count; i++) {
+  for (int i = 0; i < pushing.count; i++) {
     Term neg = pushing.rdxs[i][0];
     Term pos = pushing.rdxs[i][1];
 
@@ -1031,7 +940,7 @@ void interact(Term neg, Term pos) {
 
 // Perform interactions until the redex stack is empty
 // Returns the number of interactions performed
-void *normalize(void *v) {
+void normalize() {
   Term neg, pos;
 
   // Process redexes until the stack is empty
@@ -1048,9 +957,7 @@ void *normalize(void *v) {
   }
   // */
 
-  u64 *res = malloc(sizeof(u64));
-  *res = rdxCount;
-  return res;
+  return;
 }
 
 Term argsNet(NativeArgs *args) {
@@ -1316,20 +1223,6 @@ a64* get_buff(void) {
   return BUFF;
 }
 
-void spawn_threads() {
-  /*
-    long num_cores = 1; // sysconf(_SC_NPROCESSORS_ONLN);, tmp
-    if (num_cores < 1) {
-    perror("sysconf");
-    exit(EXIT_FAILURE);
-    }
-    // */
-
-  for (long i = 0; i < threadCount; i++) {
-    pthread_create(&threads[i], NULL, normalize, (void*)i);
-  }
-}
-
 // Initialize the virtual machine with a given heap size
 void hvm_init(u64 size) {
   srand(time(NULL));
@@ -1337,14 +1230,6 @@ void hvm_init(u64 size) {
   BUFF = (a64*)calloc(size, sizeof(a64));
   if (!BUFF) {
     fprintf(stderr, "Failed to allocate memory\n");
-    abort();
-  }
-
-  RBAG_BUFF = (Term*)calloc(RBAG_SIZE, sizeof(Term));
-  if (!RBAG_BUFF) {
-    fprintf(stderr, "Failed to allocate memory for redex stack\n");
-    free(BUFF);
-    BUFF = NULL;
     abort();
   }
 
@@ -1375,39 +1260,22 @@ void hvm_free(void) {
   pthread_mutex_destroy(&redex_mutex);
   free(BUFF);
   BUFF = NULL;
-
-  if (RBAG_BUFF != NULL) {
-    free(RBAG_BUFF);
-    RBAG_BUFF = NULL;
-  }
 }
 
 void hvm_reset(void) {
-  if (BUFF == NULL || RBAG_BUFF == NULL) {
+  if (BUFF == NULL) {
     fprintf(stderr, "Error: Cannot reset uninitialized VM. Call hvm_init first.\n");
     abort();
   }
 
-  // Clear memory to prevent stale data
-  // memset(BUFF, 0, BUFF_SIZE * sizeof(Term));
-  memset(RBAG_BUFF, 0, RBAG_SIZE * sizeof(Term));
-
   // Reset node index
   atomic_store_explicit(&RNOD_END, 0, memory_order_relaxed);;
-
-  // Reset bag index
-  atomic_store_explicit(&RBAG_END, 0, memory_order_relaxed);;
 
   // Initialize the free list (initially empty)
   FREE_LIST = EMPTY_FREE_LIST;
   atomic_store_explicit(&glblAlloced, 0, memory_order_relaxed);
   atomic_store_explicit(&waiting, 0, memory_order_relaxed);
   rdxCount = 0;
-}
-
-// For testing only
-Term* get_rbag_buff(void) {
-  return RBAG_BUFF;
 }
 
 // Print contents of BUFF between start and end locations

@@ -4,28 +4,6 @@
 #include <unistd.h>
 #include <sys/time.h>
 
-// Print contents of RBAG_BUFF between start and end locations
-void print_rbag(Location start, Location end) {
-  Term* buff = get_rbag_buff();
-  if (!buff) {
-    printf("RBAG_BUFF is not initialized\n");
-    return;
-  }
-  if (start >= end) {
-    printf("Invalid range: start=%u end=%u\n", start, end);
-    return;
-  }
-  printf("RBAG contents from %u to %u:\n", start, end);
-  for (Location i = start; i < end; i += 2) {
-    printf(" %.3x  ", i);
-    print_raw_term(buff[i]);
-    printf("  ");
-    print_raw_term(buff[i + 1]);
-    printf("\n");
-  }
-  printf("\n");
-}
-
 void leafFn(Term ref, Term args) {
   Term a0 = pair_make(APP, 0, NUL, SUB);
   Term b = term_new(VAR, 0, port(2, term_loc(a0)));
@@ -167,55 +145,18 @@ void endFn(Term ref, Term args) {
       break;
 
     case I60: 
-      /*
-	u64 allocCount = atomic_load_explicit(&alloced, memory_order_relaxed);
-	if (allocCount != 0) {
-	printf("alloced pairs: %lu\n", allocCount);
-	// print_free_list();
-	exit(1);
-	}
-	// */
-#ifndef SINGLE_THREAD
-      do {
-	currTop = atomic_exchange_explicit(&RBAG_END, LOCK_REDEX_STACK, memory_order_relaxed);
-	switch (currTop) {
-	case LOCK_REDEX_STACK:
-	  break;
+      gettimeofday(&endTime, NULL);
+      elapsed = (endTime.tv_sec - startTime.tv_sec) +
+	(endTime.tv_usec - startTime.tv_usec) / 1000000.0;
 
-	default:
-	  if (1) {
-	    gettimeofday(&endTime, NULL);
-	    elapsed = (endTime.tv_sec - startTime.tv_sec) +
-	      (endTime.tv_usec - startTime.tv_usec) / 1000000.0;
-
-	    pair_free(term_loc(args));
-	    pthread_mutex_lock(&redex_mutex);
-	    print_term("result", rTrm);
-	    printf("exptd: %lu\n", expected);
-	    if (expected != get_i60(rTrm)) {
-	      abort();
-	    }
-#ifdef SAFETY
-	    // Check if there's space in the bag
-	    if (currTop + threadCount - 1 > RBAG_SIZE) {
-	      fprintf(stderr, "Error: Redex bag is full. RBAG_END=%lu, RBAG_SIZE=%lu\n",
-		      currTop, RBAG_SIZE);
-	      abort();
-	    }
-#endif
-	    u64 newTop = currTop;
-	    for (int i = 0; i < threadCount * 2; i++, newTop += 2) {
-	      RBAG_BUFF[newTop] = 0;
-	      RBAG_BUFF[newTop + 1] = 0;
-	    }
-	    atomic_store_explicit(&RBAG_END, newTop, memory_order_relaxed);
-	    u64 waitingThreads = atomic_load_explicit(&waiting, memory_order_relaxed);
-	    pthread_cond_signal(&redex_cond);
-	    pthread_mutex_unlock(&redex_mutex);
-	  }
-	}
-      } while (currTop == LOCK_REDEX_STACK);
-#endif
+      pair_free(term_loc(args));
+      pthread_mutex_lock(&redex_mutex);
+      print_term("result", rTrm);
+      printf("exptd: %lu\n", expected);
+      if (expected != get_i60(rTrm)) {
+	abort();
+	break;
+      }
       break;
 
     default:
@@ -269,18 +210,13 @@ int main(int argc, char *argv[]) {
     Term a3 = pair_make(APP, 0, term_new(VAR, 0, port(2, term_loc(a))), SUB);
 
     unsigned i = 0;
-    RBAG_BUFF[i++] = a0; RBAG_BUFF[i++] = make;
-    RBAG_BUFF[i++] = a; RBAG_BUFF[i++] = sum;
-    RBAG_BUFF[i++] = a3; RBAG_BUFF[i++] = end;
-    atomic_store_explicit(&RBAG_END, 6, memory_order_relaxed);
+    store_redex(a0, make);
+    store_redex(a, sum);
+    store_redex(a3, end);
 
-    spawn_threads();
-    u64 *res;
+    normalize();
+
     u64 interactions = rdxCount;
-    for(int i = 0; i < threadCount; i++) {
-      pthread_join(threads[i], (void **)&res);
-      interactions += *res;
-    }
     printf("interactions: %lu\n", interactions);
     printf("MIPS: %f\n", interactions / elapsed / 1000000);
     printf("elapsed: %f\n", elapsed);
