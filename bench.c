@@ -150,7 +150,6 @@ void endFn(Term ref, Term args) {
 	(endTime.tv_usec - startTime.tv_usec) / 1000000.0;
 
       pair_free(term_loc(args));
-      pthread_mutex_lock(&redex_mutex);
       print_term("result", rTrm);
       printf("exptd: %lu\n", expected);
       if (expected != get_i60(rTrm)) {
@@ -220,16 +219,7 @@ int main(int argc, char *argv[]) {
     printf("interactions: %lu\n", interactions);
     printf("MIPS: %f\n", interactions / elapsed / 1000000);
     printf("elapsed: %f\n", elapsed);
-    printf("Heap needed: %lu\n", atomic_load_explicit(&RNOD_END, memory_order_relaxed));
-    i64 gAlloced = atomic_load_explicit(&glblAlloced, memory_order_relaxed);
-    i64 rnod = atomic_load_explicit(&RNOD_END, memory_order_relaxed);
-    if (glblAlloced != 0) {
-      printf("final alloced: %ld\n", gAlloced);
-      printf("RNOD_END: %ld\n", rnod);
-      print_free_list();
-      print_buff(0, rnod); 
-      BOOM("");
-    }
+    printf("Heap needed: %u\n", RNOD_END);
   }
 
   return 0;

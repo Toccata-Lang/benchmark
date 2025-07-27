@@ -2,12 +2,12 @@
 #include <string.h>
 
 // Global heap
-static a64* BUFF = NULL;
-a64 RNOD_END = 0; // Only need to track the end of the node space
-static u64 BUFF_SIZE = 0; // Size of the main buffer for bounds checking
+#define BUFF_SIZE 1000 // Size of the main buffer for bounds checking
+Term BUFF[BUFF_SIZE];
+Location RNOD_END = 0; // Only need to track the end of the node space
 
 // Free list for O(1) pair allocation
-__thread Location FREE_LIST = EMPTY_FREE_LIST; // Head of the free list (atomic for thread safety)
+__thread Location FREE_LIST = EMPTY_FREE_LIST; // Head of the free list
 
 // Redex stack
 __thread Pairs pairs;
@@ -15,12 +15,6 @@ __thread u64 rdxCount = 0;
 
 // interaction jump table
 interactionFn interactions[16][16];
-
-// Mutex for thread-safe redex operations
-pthread_mutex_t redex_mutex;
-
-// Condition variable for signaling when redex is available
-pthread_cond_t redex_cond;
 
 // Convert a tag to its string representation
 const char* tag_to_string(Tag tag) {
@@ -63,20 +57,15 @@ void ABRT(Term neg, Term pos) {
 }
 
 void *boom(char *msg, char *file, int line) {
-#ifndef SINGLE_THREAD
-  pthread_mutex_lock(&redex_mutex);
-#endif
   fprintf(stderr, "%s at %s:%d\n", msg, file, line);
   abort();
 }
 
 // Get term at location
 Term get(Location loc) {
-  Term result = atomic_load_explicit(&BUFF[loc], memory_order_relaxed);
-  return result;
+  return BUFF[loc];
 }
 
-// Atomic swap operation
 // If a deferred redex is found, queue it up and return SUB
 // Otherwise, return a positive value.
 Term swapStore(Location loc, Term term) {
@@ -84,7 +73,8 @@ Term swapStore(Location loc, Term term) {
   if (term == 0)
     BOOM("bad swap");
 #endif
-  Term result = atomic_exchange_explicit(&BUFF[loc], term, memory_order_relaxed);
+  Term result = get(loc);
+  BUFF[loc] = term;
   if (term_tag(result) == SUB && result != SUB) {
     Term neg = get(port(1, term_loc(result)));
     Term pos = get(port(2, term_loc(result)));
@@ -96,7 +86,7 @@ Term swapStore(Location loc, Term term) {
 }
 
 void freeLoc(Location loc) {
-  atomic_store_explicit(&BUFF[loc], 0, memory_order_relaxed);
+  BUFF[loc] = 0;
   Location evenLoc = loc & 0xFFFFFFFE;
   if (get(evenLoc) == 0 && get(evenLoc + 1) == 0) {
     pair_free(evenLoc);
@@ -178,8 +168,6 @@ void moveStore(Location neg_loc, Term pos) {
 int threadCount = 1;
 pthread_t threads[200];
 
-a64 waiting;
-
 // Pop a redex (pair of terms) from the reduction bag
 // Returns false if the bag is empty, true otherwise
 bool pop_redex(Term* neg, Term* pos) {
@@ -199,14 +187,9 @@ bool pop_redex(Term* neg, Term* pos) {
   return result;
 }
 
-a64 glblAlloced;
-
 // Allocate a pair from the free list - O(1)
 // By popping a value from the free stack
 Location pair_alloc(void) {
-#ifdef SAFETY
-  atomic_fetch_add_explicit(&glblAlloced, 1, memory_order_relaxed);
-#endif
   Location loc;
   do {
     loc = FREE_LIST;
@@ -215,11 +198,12 @@ Location pair_alloc(void) {
       break;
 
     case EMPTY_FREE_LIST:
-      loc = atomic_fetch_add_explicit(&RNOD_END, 2, memory_order_relaxed);
+      loc = RNOD_END;
+      RNOD_END += 2;
       // printf("new pair: %d\n", loc);
       // Check if we have space in the buffer
       if (loc >= BUFF_SIZE) {
-	fprintf(stderr, "Error: Not enough space to allocate pair. RNOD_END=%u, BUFF_SIZE=%lu\n",
+	fprintf(stderr, "Error: Not enough space to allocate pair. RNOD_END=%u, BUFF_SIZE=%u\n",
 		loc, BUFF_SIZE);
 	abort();
       }
@@ -232,12 +216,6 @@ Location pair_alloc(void) {
 	Location new_free_list = (Location)(next >> (TAG_SIZE + LAB_SIZE));
 	FREE_LIST = new_free_list;
       }
-
-      /* for the redex stack
-      loc = freeStack[currTop];
-      currTop--;
-      atomic_store_explicit(&freeStackPtr, currTop, memory_order_relaxed);
-      // */
       break;
     }
   } while (loc == LOCK_FREE_LIST);
@@ -247,12 +225,9 @@ Location pair_alloc(void) {
 // Free a pair by adding it to the free list - O(1)
 void freer(unsigned line, Location loc) {
   // printf("free pair at: %d\n", loc);
-#ifdef SAFETY
-  atomic_fetch_add_explicit(&glblAlloced, -1, memory_order_relaxed);
-#endif
 
   // Clear the second cell
-  atomic_store_explicit(&BUFF[loc + 1], 0, memory_order_relaxed);
+  BUFF[loc + 1] = 0;
 
   Location currTop;
   do {
@@ -263,7 +238,7 @@ void freer(unsigned line, Location loc) {
 
     default:
       // Set up the node to point to the current head
-      atomic_store_explicit(&BUFF[loc], term_new(NUL, 0, currTop), memory_order_relaxed);
+      BUFF[loc] = term_new(NUL, 0, currTop);
       FREE_LIST = loc;
       break;
     }
@@ -448,8 +423,8 @@ Term pair_maker(unsigned line, Tag tag, Lab lab, Term fst, Term snd) {
 #endif
 
   // Store terms in their respective ports
-  atomic_store_explicit(&BUFF[port(1, loc)], fst, memory_order_relaxed);
-  atomic_store_explicit(&BUFF[port(2, loc)], snd, memory_order_relaxed);
+  BUFF[port(1, loc)] = fst;
+  BUFF[port(2, loc)] = snd;
 
   Term new_pair = term_new(tag, lab, loc);
   /*
@@ -948,14 +923,6 @@ void normalize() {
     // Perform the interaction
     interact(neg, pos);
   }
-  //*
-  u64 waitingThreads = atomic_load_explicit(&waiting, memory_order_relaxed);
-  if (waitingThreads > 0) {
-    pthread_mutex_lock(&redex_mutex);
-    pthread_cond_signal(&redex_cond);
-    pthread_mutex_unlock(&redex_mutex);
-  }
-  // */
 
   return;
 }
@@ -1219,84 +1186,39 @@ void print_term(const char* prefix, Term term) {
   printf("\n");
 }
 
-a64* get_buff(void) {
-  return BUFF;
-}
-
 // Initialize the virtual machine with a given heap size
 void hvm_init(u64 size) {
   srand(time(NULL));
-  
-  BUFF = (a64*)calloc(size, sizeof(a64));
-  if (!BUFF) {
-    fprintf(stderr, "Failed to allocate memory\n");
-    abort();
-  }
-
-  // Store the size of the buffer for bounds checking in pair_alloc
-  BUFF_SIZE = size;
-
-  // Initialize mutex for thread-safe redex operations
-  if (pthread_mutex_init(&redex_mutex, NULL) != 0) {
-    fprintf(stderr, "Failed to initialize mutex\n");
-    abort();
-  }
-
-  // Initialize condition variable for redex signaling
-  if (pthread_cond_init(&redex_cond, NULL) != 0) {
-    fprintf(stderr, "Failed to initialize condition variable\n");
-    abort();
-  }
 }
 
 // Free allocated memory
 void hvm_free(void) {
-  if (BUFF == NULL) {
-    return;
-  }
-
-  // Destroy mutex and condition variable
-  pthread_cond_destroy(&redex_cond);
-  pthread_mutex_destroy(&redex_mutex);
-  free(BUFF);
-  BUFF = NULL;
+  return;
 }
 
 void hvm_reset(void) {
-  if (BUFF == NULL) {
-    fprintf(stderr, "Error: Cannot reset uninitialized VM. Call hvm_init first.\n");
-    abort();
-  }
-
   // Reset node index
-  atomic_store_explicit(&RNOD_END, 0, memory_order_relaxed);;
+  RNOD_END = 0;
 
   // Initialize the free list (initially empty)
   FREE_LIST = EMPTY_FREE_LIST;
-  atomic_store_explicit(&glblAlloced, 0, memory_order_relaxed);
-  atomic_store_explicit(&waiting, 0, memory_order_relaxed);
   rdxCount = 0;
 }
 
 // Print contents of BUFF between start and end locations
 void print_buff(Location start, Location end) {
-  a64* buff = get_buff();
-  if (!buff) {
-    printf("BUFF is not initialized\n");
-    return;
-  }
   if (start >= end) {
     printf("Invalid range: start=%u end=%u\n", start, end);
     return;
   }
   printf("BUFF contents from %u to %u:\n", start, end);
   for (Location i = start; i < end; i += 2) {
-    Term t1 = buff[i];
+    Term t1 = BUFF[i];
     if (term_tag(t1) != NUL) {
       printf(" %.3x  ", i);
       print_raw_term(t1);
       printf("  ");
-      print_raw_term(buff[i + 1]);
+      print_raw_term(BUFF[i + 1]);
       printf("\n");
     }
   }

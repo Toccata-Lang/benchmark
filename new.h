@@ -1,12 +1,9 @@
 #ifndef NEW_H
 #define NEW_H
 
-#include <stdatomic.h>
-
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdatomic.h>
 #include <stdbool.h>
 #include <pthread.h>
 
@@ -16,7 +13,6 @@ typedef int64_t i64;
 typedef uint32_t u32;
 typedef uint32_t Location;
 typedef uint32_t Lab;
-typedef atomic_uint_least64_t a64;
 
 // Bit layout constants
 #define TAG_SIZE 4
@@ -40,13 +36,8 @@ typedef u64 Term;
 extern __thread u64 rdxCount;
 
 // Global VM state
-extern a64 glblAlloced;
-extern a64 RNOD_END;
+extern Location RNOD_END;
 extern int threadCount;
-extern pthread_mutex_t redex_mutex; // Mutex for thread-safe redex operations
-extern pthread_cond_t redex_cond; // Condition variable for signaling when redex is available
-extern a64* get_buff(void);  // For testing only
-extern Term* get_rbag_buff(void);  // For testing only
 void print_free_list(void);   // For debugging
 void print_raw_term(Term t);
 void print_term(const char* prefix, Term term);
@@ -159,5 +150,3 @@ void freer(unsigned line, Location loc);
 Term pair_maker(unsigned line, Tag tag, Lab lab, Term fst, Term snd);
 #define pair_make(t, l, f, s) pair_maker(__LINE__, (t), (l), (f), (s))
 #endif // NEW_H
-
-extern pthread_mutex_t buff_mutex;
